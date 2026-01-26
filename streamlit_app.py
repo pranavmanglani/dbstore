@@ -13,9 +13,8 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 BUCKET_NAME = "uploads"
 
-st.set_page_config(page_title="Private File Share", layout="wide")
+st.set_page_config(page_title="Private Cloud Link", layout="wide")
 
-# --- UTILS ---
 def clean_filename(name):
     return re.sub(r'[^a-zA-Z0-9.-]', '_', name)
 
@@ -33,67 +32,65 @@ def preview_file(file_data, filename):
     elif ext == ".zip":
         with zipfile.ZipFile(io.BytesIO(file_data)) as z:
             files = z.namelist()
-            st.write("Files in ZIP:", files)
-            selected = st.selectbox("View file inside ZIP:", files)
-            if st.button("Unzip & Preview"):
+            selected = st.selectbox("Files in ZIP:", files)
+            if st.button("Unzip & View"):
                 with z.open(selected) as f:
                     try:
                         st.code(f.read().decode())
                     except:
-                        st.write("Cannot preview this sub-file type.")
+                        st.write("Cannot preview this format as text.")
     else:
         try:
             st.code(file_data.decode(errors='ignore'))
         except:
-            st.info("No preview available for this file type.")
+            st.info("No preview available.")
 
-# --- ROUTING LOGIC (Google Drive Style) ---
+# --- ROUTING ---
 params = st.query_params
 if "file" in params:
     file_id = params["file"]
-    st.title(f"📥 Shared File: {file_id}")
-    
+    st.title(f"📥 {file_id}")
     try:
         file_bytes = supabase.storage.from_(BUCKET_NAME).download(file_id)
-        
-        col1, col2 = st.columns([1, 3])
+        col1, col2 = st.columns([1, 4])
         with col1:
-            st.download_button("💾 Download File", file_bytes, file_name=file_id)
-            st.button("🔄 Refresh View")
+            st.download_button("💾 Download", file_bytes, file_name=file_id)
+            if st.button("➕ Upload New"):
+                st.query_params.clear()
+                st.rerun()
         with col2:
-            st.subheader("Preview")
             preview_file(file_bytes, file_id)
     except:
-        st.error("File not found or link is broken.")
+        st.error("File not found.")
     st.stop()
 
-# --- UPLOADER UI (Private) ---
+# --- PRIVATE UPLOADER ---
 st.title("📂 Private Link Generator")
-st.write("Upload a file. Only people with the generated link can see it.")
-
-uploaded_file = st.file_uploader("Upload File", type=None)
+uploaded_file = st.file_uploader("Upload", type=None)
 
 if uploaded_file:
-    if st.button("🚀 Get Share Link"):
+    if st.button("🚀 Generate Link"):
         with st.spinner("Uploading..."):
             name = clean_filename(uploaded_file.name)
             try:
-                # Actual Fix: Use Boolean True
+                # FIX: Stringify headers, keep 'upsert' logic clean
                 supabase.storage.from_(BUCKET_NAME).upload(
                     path=name, 
                     file=uploaded_file.getvalue(), 
-                    file_options={"upsert": True, "content-type": uploaded_file.type}
+                    file_options={
+                        "x-upsert": "true", # Using the header string variant
+                        "content-type": str(uploaded_file.type)
+                    }
                 )
                 
-                # Construct the link
                 host = st.context.headers.get("host")
                 protocol = "https" if "streamlit.app" in host else "http"
                 share_url = f"{protocol}://{host}/?file={name}"
                 
-                # Store metadata for routing (No history display)
+                # Save metadata
                 supabase.table("file_shares").upsert({"file_name": name, "file_url": share_url}).execute()
                 
-                st.success("Permanent Link Generated!")
+                st.success("Private Link Created!")
                 st.code(share_url)
             except Exception as e:
                 st.error(f"Error: {e}")
