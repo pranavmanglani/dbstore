@@ -1,151 +1,82 @@
 import streamlit as st
 import pandas as pd
-import math
-from pathlib import Path
+import zipfile
+import io
+import os
+from supabase import create_client
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+# --- SUPABASE CONFIG ---
+SUPABASE_URL = "https://tkmdbsrlybwluwnkqoxl.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRrbWRic3JseWJ3bHV3bmtxb3hsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjkzOTUzMDUsImV4cCI6MjA4NDk3MTMwNX0.e15bef7tr20Zc5RqY5sopOC-oJYAFEqk9i52OlJsFHw"
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+BUCKET_NAME = "uploads"
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+st.set_page_config(page_title="Permanent File Share", layout="wide")
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+## --- HELPER FUNCTIONS ---
+def get_public_url(file_path):
+    return f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET_NAME}/{file_path}"
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+def upload_to_supabase(file):
+    # Upload file to storage
+    file_bytes = file.getvalue()
+    supabase.storage.from_(BUCKET_NAME).upload(file.name, file_bytes, {"upsert": "true"})
+    
+    # Save metadata to DB
+    public_url = get_public_url(file.name)
+    supabase.table("file_shares").insert({
+        "file_name": file.name,
+        "file_url": public_url,
+        "file_type": file.type
+    }).execute()
+    return public_url
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+## --- UI INTERFACE ---
+st.title("📂 All-in-One Permanent Share")
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+tab1, tab2 = st.tabs(["Upload & Preview", "Shared History"])
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
+with tab1:
+    uploaded_file = st.file_uploader("Upload any file", type=None)
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+    if uploaded_file:
+        if st.button("🚀 Upload & Generate Permanent Link"):
+            with st.spinner("Uploading..."):
+                url = upload_to_supabase(uploaded_file)
+                st.success(f"File uploaded! Permanent Link: {url}")
+                st.code(url)
 
-    return gdp_df
+        # --- UNIVERSAL OPENER LOGIC ---
+        st.divider()
+        st.subheader("👀 File Preview")
+        ext = os.path.splitext(uploaded_file.name)[1].lower()
 
-gdp_df = get_gdp_data()
+        if ext == ".zip":
+            with zipfile.ZipFile(uploaded_file) as z:
+                st.write("Contents of ZIP:", z.namelist())
+                sub_file = st.selectbox("Select file inside ZIP to open", z.namelist())
+                if st.button("Unzip & View"):
+                    with z.open(sub_file) as f:
+                        st.text(f.read().decode(errors='ignore'))
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
+        elif ext in [".csv", ".xlsx", ".xls"]:
+            df = pd.read_csv(uploaded_file) if ext == ".csv" else pd.read_excel(uploaded_file)
+            st.dataframe(df)
 
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
+        elif ext in [".txt", ".json", ".py", ".md"]:
+            st.text(uploaded_file.getvalue().decode())
 
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
+        elif ext in [".png", ".jpg", ".jpeg"]:
+            st.image(uploaded_file)
+        
         else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
+            st.warning("Preview not supported for this format, but the link will work!")
 
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+with tab2:
+    st.subheader("🔗 All Permanent Links")
+    res = supabase.table("file_shares").select("*").order("created_at", desc=True).execute()
+    if res.data:
+        df_history = pd.DataFrame(res.data)
+        st.table(df_history[["file_name", "file_url", "created_at"]])
+    else:
+        st.write("No files shared yet.")
