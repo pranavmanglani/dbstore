@@ -3,6 +3,8 @@ import pandas as pd
 import zipfile
 import io
 import os
+import re
+import base64
 from supabase import create_client
 
 # --- SUPABASE CONFIG ---
@@ -11,72 +13,84 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 BUCKET_NAME = "uploads"
 
-st.set_page_config(page_title="Permanent File Share", layout="wide")
+st.set_page_config(page_title="Cloud Drive Share", layout="wide")
 
-## --- HELPER FUNCTIONS ---
-def get_public_url(file_path):
-    return f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET_NAME}/{file_path}"
+# --- UTILS ---
+def clean_filename(name):
+    return re.sub(r'[^a-zA-Z0-9.-]', '_', name)
 
-def upload_to_supabase(file):
-    # Upload file to storage
-    file_bytes = file.getvalue()
-    supabase.storage.from_(BUCKET_NAME).upload(file.name, file_bytes, {"upsert": "true"})
+def get_viewer_link(filename):
+    # This creates the link that points back to YOUR Streamlit app
+    base_url = "https://your-app-url.streamlit.app" # UPDATE THIS after you deploy
+    return f"{base_url}/?file={filename}"
+
+def preview_file(file_data, filename, mime_type):
+    ext = os.path.splitext(filename)[1].lower()
     
-    # Save metadata to DB
-    public_url = get_public_url(file.name)
-    supabase.table("file_shares").insert({
-        "file_name": file.name,
-        "file_url": public_url,
-        "file_type": file.type
-    }).execute()
-    return public_url
-
-## --- UI INTERFACE ---
-st.title("📂 All-in-One Permanent Share")
-
-tab1, tab2 = st.tabs(["Upload & Preview", "Shared History"])
-
-with tab1:
-    uploaded_file = st.file_uploader("Upload any file", type=None)
-
-    if uploaded_file:
-        if st.button("🚀 Upload & Generate Permanent Link"):
-            with st.spinner("Uploading..."):
-                url = upload_to_supabase(uploaded_file)
-                st.success(f"File uploaded! Permanent Link: {url}")
-                st.code(url)
-
-        # --- UNIVERSAL OPENER LOGIC ---
-        st.divider()
-        st.subheader("👀 File Preview")
-        ext = os.path.splitext(uploaded_file.name)[1].lower()
-
-        if ext == ".zip":
-            with zipfile.ZipFile(uploaded_file) as z:
-                st.write("Contents of ZIP:", z.namelist())
-                sub_file = st.selectbox("Select file inside ZIP to open", z.namelist())
-                if st.button("Unzip & View"):
-                    with z.open(sub_file) as f:
-                        st.text(f.read().decode(errors='ignore'))
-
-        elif ext in [".csv", ".xlsx", ".xls"]:
-            df = pd.read_csv(uploaded_file) if ext == ".csv" else pd.read_excel(uploaded_file)
-            st.dataframe(df)
-
-        elif ext in [".txt", ".json", ".py", ".md"]:
-            st.text(uploaded_file.getvalue().decode())
-
-        elif ext in [".png", ".jpg", ".jpeg"]:
-            st.image(uploaded_file)
-        
-        else:
-            st.warning("Preview not supported for this format, but the link will work!")
-
-with tab2:
-    st.subheader("🔗 All Permanent Links")
-    res = supabase.table("file_shares").select("*").order("created_at", desc=True).execute()
-    if res.data:
-        df_history = pd.DataFrame(res.data)
-        st.table(df_history[["file_name", "file_url", "created_at"]])
+    if ext == ".pdf":
+        base64_pdf = base64.b64encode(file_data).decode('utf-8')
+        pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="600"></iframe>'
+        st.markdown(pdf_display, unsafe_allow_html=True)
+    elif ext in [".png", ".jpg", ".jpeg", ".gif"]:
+        st.image(file_data)
+    elif ext in [".csv", ".xlsx"]:
+        df = pd.read_csv(io.BytesIO(file_data)) if ext == ".csv" else pd.read_excel(io.BytesIO(file_data))
+        st.dataframe(df)
     else:
-        st.write("No files shared yet.")
+        try:
+            st.code(file_data.decode(errors='ignore'))
+        except:
+            st.info("No preview available for this file type.")
+
+# --- ROUTING LOGIC (The "Google Drive" Part) ---
+query_params = st.query_params
+if "file" in query_params:
+    target_file = query_params["file"]
+    st.title(f"📥 Download: {target_file}")
+    
+    try:
+        # Fetch file from Supabase
+        file_bytes = supabase.storage.from_(BUCKET_NAME).download(target_file)
+        
+        col1, col2 = st.columns([1, 2])
+        with col1:
+            st.download_button(label="💾 Download Now", data=file_bytes, file_name=target_file)
+            if st.button("⬅️ Upload New File"):
+                st.query_params.clear()
+                st.rerun()
+        
+        with col2:
+            st.subheader("Preview")
+            preview_file(file_bytes, target_file, "application/octet-stream")
+            
+    except Exception as e:
+        st.error("File not found or link expired.")
+    st.stop() # Prevents the rest of the app from loading if viewing a specific file
+
+# --- MAIN UPLOAD UI ---
+st.title("📂 All-in-One Permanent Share")
+uploaded_file = st.file_uploader("Upload a file to get a permanent share link", type=None)
+
+if uploaded_file:
+    if st.button("🚀 Generate Share Link"):
+        with st.spinner("Processing..."):
+            name = clean_filename(uploaded_file.name)
+            # Upload to Supabase
+            supabase.storage.from_(BUCKET_NAME).upload(path=name, file=uploaded_file.getvalue(), file_options={"upsert": "true"})
+            
+            # Save to Table
+            share_link = get_viewer_link(name)
+            supabase.table("file_shares").upsert({"file_name": name, "file_url": share_link}).execute()
+            
+            st.success("Link Created!")
+            st.code(share_link)
+            st.info("Anyone with this link can now download or preview this file on this site.")
+
+# History Tab
+st.divider()
+st.subheader("📜 Recent Uploads")
+res = supabase.table("file_shares").select("*").order("created_at", desc=True).limit(10).execute()
+if res.data:
+    for item in res.data:
+        st.write(f"🔗 {item['file_name']} — [View/Download]({item['file_url']})")
+        
