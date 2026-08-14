@@ -56,8 +56,7 @@ if "file" in params:
         with col1:
             st.download_button("💾 Download", file_bytes, file_name=file_id)
             if st.button("➕ Upload New"):
-                st.query_params.clear()
-                st.rerun()
+                print("meow")
         with col2:
             preview_file(file_bytes, file_id)
     except:
