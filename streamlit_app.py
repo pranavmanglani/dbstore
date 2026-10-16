@@ -1,95 +1,237 @@
+
 import streamlit as st
 import pandas as pd
 import zipfile
 import io
 import os
 import re
-import base64
 from supabase import create_client
 
-# --- SUPABASE CONFIG ---
-SUPABASE_URL = "https://tkmdbsrlybwluwnkqoxl.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRrbWRic3JseWJ3bHV3bmtxb3hsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjkzOTUzMDUsImV4cCI6MjA4NDk3MTMwNX0.e15bef7tr20Zc5RqY5sopOC-oJYAFEqk9i52OlJsFHw"
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-BUCKET_NAME = "uploads"
+st.set_page_config(
+    page_title="Private Cloud Gallery",
+    page_icon="📂",
+    layout="wide"
+)
 
-st.set_page_config(page_title="Private Cloud Link", layout="wide")
+# --- SERVER-SIDE SUPABASE CONFIG ---
+SUPABASE_URL = st.secrets["SUPABASE_URL"]
+SUPABASE_KEY = st.secrets["SUPABASE_SERVICE_ROLE_KEY"]
+BUCKET_NAME = st.secrets.get("BUCKET_NAME", "uploads")
+
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 
 def clean_filename(name):
-    return re.sub(r'[^a-zA-Z0-9.-]', '_', name)
+    return re.sub(r"[^a-zA-Z0-9._-]", "_", name)
 
-def preview_file(file_data, filename):
+
+def list_all_files():
+    """List files in the bucket, including nested folders."""
+    result = []
+    folders = [""]
+    visited = set()
+
+    while folders:
+        folder = folders.pop()
+
+        if folder in visited:
+            continue
+        visited.add(folder)
+
+        offset = 0
+        while True:
+            response = supabase.storage.from_(BUCKET_NAME).list(
+                folder,
+                {
+                    "limit": 100,
+                    "offset": offset,
+                    "sortBy": {
+                        "column": "name",
+                        "order": "asc"
+                    }
+                }
+            )
+
+            if not response:
+                break
+
+            for item in response:
+                name = item.get("name", "")
+                if not name:
+                    continue
+
+                path = f"{folder}/{name}".lstrip("/")
+
+                # Folders usually have no file ID; files have metadata.
+                if item.get("id") is None and item.get("metadata") is None:
+                    folders.append(path)
+                else:
+                    result.append({
+                        "name": name,
+                        "path": path,
+                        "size": (item.get("metadata") or {}).get("size")
+                    })
+
+            if len(response) < 100:
+                break
+
+            offset += len(response)
+
+    return sorted(result, key=lambda f: f["path"].lower())
+
+
+def preview_file(data, filename):
     ext = os.path.splitext(filename)[1].lower()
-    if ext == ".pdf":
-        base64_pdf = base64.b64encode(file_data).decode('utf-8')
-        pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="600"></iframe>'
-        st.markdown(pdf_display, unsafe_allow_html=True)
-    elif ext in [".png", ".jpg", ".jpeg", ".gif", ".webp"]:
-        st.image(file_data)
-    elif ext in [".csv", ".xlsx"]:
-        df = pd.read_csv(io.BytesIO(file_data)) if ext == ".csv" else pd.read_excel(io.BytesIO(file_data))
-        st.dataframe(df, use_container_width=True)
-    elif ext == ".zip":
-        with zipfile.ZipFile(io.BytesIO(file_data)) as z:
-            files = z.namelist()
-            selected = st.selectbox("Files in ZIP:", files)
-            if st.button("Unzip & View"):
-                with z.open(selected) as f:
-                    try:
-                        st.code(f.read().decode())
-                    except:
-                        st.write("Cannot preview this format as text.")
-    else:
-        try:
-            st.code(file_data.decode(errors='ignore'))
-        except:
-            st.info("No preview available.")
 
-# --- ROUTING ---
+    if ext == ".pdf":
+        # Inline preview only; this does not prevent saving the PDF.
+        import base64
+
+        encoded = base64.b64encode(data).decode("ascii")
+        st.markdown(
+            f'<iframe src="data:application/pdf;base64,{encoded}" '
+            'width="100%" height="700" '
+            'style="border:0"></iframe>',
+            unsafe_allow_html=True
+        )
+
+    elif ext in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
+        st.image(data, use_container_width=True)
+
+    elif ext in {".csv", ".xlsx"}:
+        try:
+            df = (
+                pd.read_csv(io.BytesIO(data))
+                if ext == ".csv"
+                else pd.read_excel(io.BytesIO(data))
+            )
+            st.dataframe(df, use_container_width=True)
+        except Exception:
+            st.error("Unable to preview this spreadsheet.")
+
+    elif ext == ".zip":
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                names = [
+                    n for n in archive.namelist()
+                    if not n.endswith("/")
+                ]
+
+                if names:
+                    selected = st.selectbox(
+                        "Choose a file to preview",
+                        names,
+                        key=f"zip_{filename}"
+                    )
+
+                    # Only display text-like files.
+                    if st.button("Preview selected file"):
+                        if os.path.splitext(selected)[1].lower() in {
+                            ".txt", ".md", ".json", ".csv",
+                            ".html", ".css", ".js", ".py", ".xml"
+                        }:
+                            content = archive.read(selected)
+                            st.code(
+                                content.decode("utf-8", errors="replace")
+                            )
+                        else:
+                            st.info(
+                                "This file type is not supported "
+                                "for ZIP preview."
+                            )
+                else:
+                    st.info("This ZIP archive contains no files.")
+        except (zipfile.BadZipFile, OSError):
+            st.error("Unable to read this ZIP archive.")
+
+    elif ext in {".txt", ".md", ".json", ".html", ".css",
+                 ".js", ".py", ".xml", ".log"}:
+        st.code(data.decode("utf-8", errors="replace"))
+
+    else:
+        st.info(
+            "No inline preview is available for this file type."
+        )
+
+
+# --- HEADER ---
+st.title("📂 Private Cloud Gallery")
+st.caption("Browse and preview files stored in the cloud.")
+
+# --- OPEN A FILE ---
 params = st.query_params
-if "file" in params:
-    file_id = params["file"]
-    st.title(f"📥 {file_id}")
+requested_file = params.get("file")
+
+if requested_file:
+    requested_file = str(requested_file).lstrip("/")
+
+    # Check that the requested path exists in the bucket.
     try:
-        file_bytes = supabase.storage.from_(BUCKET_NAME).download(file_id)
-        col1, col2 = st.columns([1, 4])
-        with col1:
-            st.download_button("💾 Download", file_bytes, file_name=file_id)
-            if st.button("➕ Upload New"):
-                print("meow")
-        with col2:
-            preview_file(file_bytes, file_id)
-    except:
-        st.error("File not found.")
+        files = list_all_files()
+        known_paths = {item["path"] for item in files}
+
+        if requested_file not in known_paths:
+            st.error("File not found.")
+            st.stop()
+
+        st.subheader(os.path.basename(requested_file))
+
+        with st.spinner("Loading preview..."):
+            data = supabase.storage.from_(BUCKET_NAME).download(
+                requested_file
+            )
+
+        preview_file(data, requested_file)
+
+        if st.button("← Back to gallery"):
+            st.query_params.clear()
+            st.rerun()
+
+    except Exception:
+        st.error("Unable to open this file. Check the storage permissions.")
+
     st.stop()
 
-# --- PRIVATE UPLOADER ---
-st.title("📂 Private Link Generator")
-uploaded_file = st.file_uploader("Upload", type=None)
 
-if uploaded_file:
-    if st.button("🚀 Generate Link"):
-        with st.spinner("Uploading..."):
-            name = clean_filename(uploaded_file.name)
-            try:
-                # FIX: Stringify headers, keep 'upsert' logic clean
-                supabase.storage.from_(BUCKET_NAME).upload(
-                    path=name, 
-                    file=uploaded_file.getvalue(), 
-                    file_options={
-                        "x-upsert": "true", # Using the header string variant
-                        "content-type": str(uploaded_file.type)
-                    }
-                )
-                
-                host = st.context.headers.get("host")
-                protocol = "https" if "streamlit.app" in host else "http"
-                share_url = f"{protocol}://{host}/?file={name}"
-                
-                # Save metadata
-                supabase.table("file_shares").upsert({"file_name": name, "file_url": share_url}).execute()
-                
-                st.success("Private Link Created!")
-                st.code(share_url)
-            except Exception as e:
-                st.error(f"Error: {e}")
+# --- PUBLIC GALLERY ---
+try:
+    with st.spinner("Loading files..."):
+        files = list_all_files()
+
+    if not files:
+        st.info("No files found in the storage bucket.")
+        st.stop()
+
+    search = st.text_input(
+        "🔎 Search files",
+        placeholder="Search by filename or folder..."
+    )
+
+    filtered = [
+        item for item in files
+        if search.lower() in item["path"].lower()
+    ]
+
+    st.caption(f"{len(filtered)} file(s)")
+
+    for item in filtered:
+        with st.container(border=True):
+            col1, col2 = st.columns([5, 1])
+
+            with col1:
+                st.write("📄 **" + item["name"] + "**")
+                st.caption(item["path"])
+
+            with col2:
+                if st.button(
+                    "Open",
+                    key="open_" + item["path"]
+                ):
+                    st.query_params["file"] = item["path"]
+                    st.rerun()
+
+except Exception:
+    st.error(
+        "Unable to list files. Verify the bucket name, "
+        "server-side key and Storage permissions."
+    )
