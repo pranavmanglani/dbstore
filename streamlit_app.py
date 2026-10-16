@@ -13,6 +13,29 @@ st.set_page_config(
     layout="wide"
 )
 
+
+# Discourage right-click and common save shortcuts.
+# This is a deterrent, not a security boundary.
+st.markdown("""
+<script>
+(function () {
+  document.addEventListener('contextmenu', function (e) {
+    if (e.target.closest('.gallery-protected')) {
+      e.preventDefault();
+    }
+  }, true);
+
+  document.addEventListener('keydown', function (e) {
+    if ((e.ctrlKey || e.metaKey) &&
+        ['s', 'u'].includes(e.key.toLowerCase())) {
+      e.preventDefault();
+    }
+  }, true);
+})();
+</script>
+""", unsafe_allow_html=True)
+
+
 # --- SERVER-SIDE SUPABASE CONFIG ---
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_KEY = st.secrets["SUPABASE_SERVICE_ROLE_KEY"]
