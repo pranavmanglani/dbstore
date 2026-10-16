@@ -1,47 +1,17 @@
-import streamlit as st
-
-st.title("Sorry we are closed")
-st.caption("Author of dbstore, pranav manglani has closed this web app due to increased storage prices and server overload, we grief for yourr inconvinience the uplooaded files are still acessible if u have there url ")
-
 
 import streamlit as st
-import pandas as pd
-import zipfile
-import io
 import os
-import re
+import io
 import base64
+import zipfile
+import pandas as pd
 from supabase import create_client
 
-# --- CONFIG ---
 st.set_page_config(
-    page_title="Private Cloud",
-    page_icon="📂",
+    page_title="DBStore — Closed",
+    page_icon="📁",
     layout="wide"
 )
-
-
-# Discourage right-click and common save shortcuts.
-# This is a deterrent, not a security boundary.
-st.markdown("""
-<script>
-(function () {
-  document.addEventListener('contextmenu', function (e) {
-    if (e.target.closest('.gallery-protected')) {
-      e.preventDefault();
-    }
-  }, true);
-
-  document.addEventListener('keydown', function (e) {
-    if ((e.ctrlKey || e.metaKey) &&
-        ['s', 'u'].includes(e.key.toLowerCase())) {
-      e.preventDefault();
-    }
-  }, true);
-})();
-</script>
-""", unsafe_allow_html=True)
-
 
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_KEY = st.secrets["SUPABASE_SERVICE_ROLE_KEY"]
@@ -49,11 +19,7 @@ BUCKET_NAME = st.secrets.get("BUCKET_NAME", "uploads")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-
-def clean_filename(name):
-    return re.sub(r"[^a-zA-Z0-9._-]", "_", name)
-
-
+# --- FILE PREVIEW ---
 def preview_file(data, filename):
     ext = os.path.splitext(filename)[1].lower()
 
@@ -61,7 +27,7 @@ def preview_file(data, filename):
         encoded = base64.b64encode(data).decode("ascii")
         st.markdown(
             f'<iframe src="data:application/pdf;base64,{encoded}" '
-            'width="100%" height="650" style="border:0"></iframe>',
+            'width="100%" height="700" style="border:0"></iframe>',
             unsafe_allow_html=True
         )
 
@@ -77,41 +43,37 @@ def preview_file(data, filename):
             )
             st.dataframe(df, use_container_width=True)
         except Exception:
-            st.error("Unable to preview this spreadsheet.")
+            st.error("Unable to preview this file.")
 
     elif ext == ".zip":
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as archive:
                 names = [
-                    n for n in archive.namelist()
-                    if not n.endswith("/")
+                    name for name in archive.namelist()
+                    if not name.endswith("/")
                 ]
 
                 if not names:
-                    st.info("This ZIP archive is empty.")
+                    st.info("This archive is empty.")
                     return
 
-                selected = st.selectbox(
-                    "Files inside archive",
-                    names,
-                    key=f"zip_{filename}"
-                )
+                selected = st.selectbox("Choose a file to view", names)
 
-                if st.button("Preview selected file"):
-                    allowed = {
-                        ".txt", ".md", ".json", ".csv", ".html",
-                        ".css", ".js", ".py", ".xml", ".log"
-                    }
-                    if os.path.splitext(selected)[1].lower() in allowed:
-                        st.code(
-                            archive.read(selected).decode(
-                                "utf-8", errors="replace"
-                            )
+                allowed = {
+                    ".txt", ".md", ".json", ".csv", ".html",
+                    ".css", ".js", ".py", ".xml", ".log"
+                }
+
+                if os.path.splitext(selected)[1].lower() in allowed:
+                    st.code(
+                        archive.read(selected).decode(
+                            "utf-8", errors="replace"
                         )
-                    else:
-                        st.info("Preview is unavailable for this file type.")
+                    )
+                else:
+                    st.info("Preview unavailable for this file type.")
         except (zipfile.BadZipFile, OSError):
-            st.error("Unable to read this ZIP archive.")
+            st.error("Unable to read this archive.")
 
     elif ext in {
         ".txt", ".md", ".json", ".html", ".css",
@@ -120,4 +82,48 @@ def preview_file(data, filename):
         st.code(data.decode("utf-8", errors="replace"))
 
     else:
-        st.info("No inline preview is available for this file type.")
+        st.info("Preview unavailable for this file type.")
+
+
+# --- URL ROUTING ---
+file_path = st.query_params.get("file")
+
+if file_path:
+    file_path = str(file_path).lstrip("/")
+
+    # Reject suspicious paths.
+    if (
+        not file_path
+        or ".." in file_path.split("/")
+        or "\\" in file_path
+    ):
+        st.error("Invalid file URL.")
+        st.stop()
+
+    try:
+        with st.spinner("Opening file..."):
+            data = supabase.storage.from_(BUCKET_NAME).download(
+                file_path
+            )
+
+        st.title(os.path.basename(file_path))
+        preview_file(data, file_path)
+
+    except Exception:
+        st.error(
+            "This file could not be opened. "
+            "It may have been removed or the link may be invalid."
+        )
+
+    st.stop()
+
+
+# --- CLOSED HOMEPAGE ---
+st.title("Sorry, we are closed")
+
+st.caption(
+    "The author of DBStore, Pranav Manglani, has closed this web "
+    "app due to increased storage costs and server overload. "
+    "We regret the inconvenience. Previously uploaded files may "
+    "still be accessible if you have their URLs."
+)
